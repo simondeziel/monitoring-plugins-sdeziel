@@ -1,0 +1,269 @@
+#!/bin/sh
+
+# Nagios plugin to monitor block I/O and bandwidth
+# Copyright (C) 20122017 Simon Deziel <simon@sdeziel.info>
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+# Example configuration
+#
+# This check needs to be installed on the monitoring target and executed through
+# NRPE. NRPE config extract example:
+#
+# command[check_blkstat]=/usr/lib/nagios/plugins/check_blkstat -d sda -w 200,10,10 -c 250,20,20
+#
+# And the config extract to add to Nagios' config:
+#
+# define service {
+#   use                 'generic-service'
+#   service_description 'Disk I/O and bandwidth'
+#   check_command       'check_nrpe!check_blkstat'
+# }
+#
+# This plugin is useful to identify high I/O activity.
+
+# Explicitly set the PATH to that of ENV_SUPATH in /etc/login.defs and unset
+# various other variables. For details, see:
+# https://wiki.ubuntu.com/SecurityTeam/AppArmorPolicyReview#Execute_rules
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export ENV=""
+export CDPATH=""
+export LC_ALL="C"
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+MSG_OK="BLKSTAT OK"
+MSG_WARNING="BLKSTAT WARNING"
+MSG_CRITICAL="BLKSTAT CRITICAL"
+MSG_UNKNOWN="BLKSTAT UNKNOWN"
+SCRIPT_NAME=$(basename "$0")
+DISK="sda" # Defaults to monitor sda
+UNIT="m"   # Defaults to express bandwidth in MiB/s
+
+p_ok () {
+  printf "%s\n" "$MSG_OK: $1"
+  exit "$STATE_OK"
+}
+p_warning () {
+  printf "%s\n" "$MSG_WARNING: $1"
+  exit "$STATE_WARNING"
+}
+p_critical () {
+  printf "%s\n" "$MSG_CRITICAL: $1"
+  exit "$STATE_CRITICAL"
+}
+p_unknown () {
+  printf "%s\n" "$MSG_UNKNOWN: $1"
+  exit "$STATE_UNKNOWN"
+}
+
+usage () {
+  cat << EOF
+Usage:
+  $SCRIPT_NAME [ -d <disk> ] -w <io/s>,<read unit/s>,<write unit/s> -c <io/s>,<read unit/s>,<write unit/s> [ -u (k|m) ] | -h
+EOF
+}
+
+long_usage () {
+  cat << EOF
+Copyright (c) 2012-2017 Simon Deziel
+
+This plugin checks the block device I/O and bandwidth statistics
+
+EOF
+  usage
+  cat << EOF
+
+This plugin checks when I/O and or bandwidth of a block device are higher than
+the warning/critical thresholds.
+EOF
+  exit 0
+}
+
+check_args () {
+  # check block dev
+  [ -z "$DISK" ]     && p_unknown "Specify a block device using -d <block>, ex: -d sda"
+
+  # Warning thresholds
+  [ -z "$WARNING" ]  && p_unknown "Missing warning thresholds, use -w <io/s,read,write>"
+  WARN_IOPS="$(echo "$WARNING" | cut -d , -f 1)"
+  WARN_READ="$(echo "$WARNING" | cut -d , -f 2)"
+  WARN_WRITE="$(echo "$WARNING" | cut -d , -f 3)"
+  [ -z "$WARN_IOPS" ]  && p_unknown "Invalid warning io/s threshold, use -w <io/s,read,write>"
+  [ -z "$WARN_READ" ]  && p_unknown "Invalid warning read threshold, use -w <io/s,read,write>"
+  [ -z "$WARN_WRITE" ] && p_unknown "Invalid warning write threshold, use -w <io/s,read,write>"
+
+  # Critical thresholds
+  [ -z "$CRITICAL" ] && p_unknown "Missing critical thresholds, use -c <io/s,read,write>"
+  CRIT_IOPS="$(echo "$CRITICAL" | cut -d , -f 1)"
+  CRIT_READ="$(echo "$CRITICAL" | cut -d , -f 2)"
+  CRIT_WRITE="$(echo "$CRITICAL" | cut -d , -f 3)"
+  [ -z "$CRIT_IOPS" ]  && p_unknown "Invalid critical io/s threshold, use -c <io/s,read,write>"
+  [ -z "$CRIT_READ" ]  && p_unknown "Invalid critical read threshold, use -c <io/s,read,write>"
+  [ -z "$CRIT_WRITE" ] && p_unknown "Invalid critical write threshold, use -c <io/s,read,write>"
+
+  # Units
+  # From Documentation/block/stat.txt:
+  # These values count the number of sectors read from or written to this
+  # block device.  The "sectors" in question are the standard UNIX 512-byte
+  # sectors, not any device- or filesystem-specific block size.  The
+  # counters are incremented when the I/O completes.
+  if [ "$UNIT" = "m" ]; then
+    # 1 MiB: 1048576 bytes => 2048 x 512 bytes sectors
+    SECTOR_PER_UNIT="2048"
+    UNIT_TXT="MiB/s"
+  elif [ "$UNIT" = "k" ]; then
+    # 1 KiB: 1024 bytes => 2 x 512 bytes sectors
+    SECTOR_PER_UNIT="2"
+    UNIT_TXT="KiB/s"
+  else
+    p_unknown "Invalid bandwidth unit ($UNIT), use -u (m|k)"
+  fi
+}
+
+parse_stats () {
+  # Previous stats
+  [ -z "$PREVIOUS_DISK_STAT" ] && rm -f "$PREVIOUS_STAT_FILE" && p_unknown "Invalid previous disk stats"
+  PREVIOUS_IO_READ="$(echo "$PREVIOUS_DISK_STAT" | awk '{print $1}')"
+  PREVIOUS_SECTOR_READ="$(echo "$PREVIOUS_DISK_STAT" | awk '{print $3}')"
+  PREVIOUS_IO_WRITE="$(echo "$PREVIOUS_DISK_STAT" | awk '{print $5}')"
+  PREVIOUS_SECTOR_WRITE="$(echo "$PREVIOUS_DISK_STAT" | awk '{print $7}')"
+  if [ -z "$PREVIOUS_IO_READ" ] || [ -z "$PREVIOUS_SECTOR_READ" ] || [ -z "$PREVIOUS_IO_WRITE" ] || [ -z "$PREVIOUS_SECTOR_WRITE" ]; then
+    rm -f "$PREVIOUS_STAT_FILE"
+    p_unknown "Invalid previous block stats"
+  fi
+
+  # Current stats
+  [ -z "$CURRENT_DISK_STAT" ] && p_unknown "Invalid previous disk stats"
+  CURRENT_IO_READ="$(echo "$CURRENT_DISK_STAT" | awk '{print $1}')"
+  CURRENT_SECTOR_READ="$(echo "$CURRENT_DISK_STAT" | awk '{print $3}')"
+  CURRENT_IO_WRITE="$(echo "$CURRENT_DISK_STAT" | awk '{print $5}')"
+  CURRENT_SECTOR_WRITE="$(echo "$CURRENT_DISK_STAT" | awk '{print $7}')"
+  if [ -z "$CURRENT_IO_READ" ] || [ -z "$CURRENT_SECTOR_READ" ] || [ -z "$CURRENT_IO_WRITE" ] || [ -z "$CURRENT_SECTOR_WRITE" ]; then
+    p_unknown "Invalid current block stats"
+  fi
+}
+
+# Check arguments
+if [ "$#" -eq 0 ]; then
+  long_usage
+fi
+
+# process command line args
+while [ ! -z "$1" ]; do
+  case $1 in
+    -d|--disk)     shift; DISK="$1";;
+    -w|--warning)  shift; WARNING="$1";;
+    -c|--critical) shift; CRITICAL="$1";;
+    -h|--help)     long_usage;;
+    -u|--unit)     shift; UNIT="$1";;
+  esac
+  shift
+done
+
+# Check args
+check_args
+
+# Get current disk stats
+[ -r "/sys/block/$DISK/stat" ] || p_unknown "Unable to read the current disk stats"
+CURRENT_DISK_STAT="$(cat "/sys/block/$DISK/stat")"
+CURRENT_RUN_TIMESTAMP="$(date +%s)"
+[ -z "$CURRENT_DISK_STAT" ] && p_unknown "Unable to read the current disk stats"
+
+# Get previous disk stats
+PREVIOUS_STAT_FILE="/var/tmp/$SCRIPT_NAME.$DISK"
+if [ ! -e "$PREVIOUS_STAT_FILE" ]; then
+  echo "$CURRENT_DISK_STAT" > "$PREVIOUS_STAT_FILE"
+  # XXX: returning unknown should not send a notification since
+  #      Nagios check multiple times before alerting
+  p_unknown "First run, no info on previous run yet."
+fi
+[ -r "$PREVIOUS_STAT_FILE" ] || p_unknown "Unable to read the previous disk stats"
+PREVIOUS_DISK_STAT="$(cat "$PREVIOUS_STAT_FILE")"
+PREVIOUS_RUN_TIMESTAMP="$(date +%s -r "$PREVIOUS_STAT_FILE")"
+[ -z "$PREVIOUS_DISK_STAT" ] && rm -f "$PREVIOUS_STAT_FILE" && \
+  p_unknown "Unable to read the previous disk stats"
+
+# Parse stats
+parse_stats
+
+# Elapsed time between current and previous run
+TIME_DELTA="$((CURRENT_RUN_TIMESTAMP - PREVIOUS_RUN_TIMESTAMP))"
+[ "$TIME_DELTA" -lt 1 ] && p_unknown "Invalid time delta between previous and current runs"
+
+# Save current run stats into previous stat file
+echo "$CURRENT_DISK_STAT" > "$PREVIOUS_STAT_FILE" || p_unknown "Unable to save current stats for later usage"
+
+# Delta
+IO_READ_DELTA="$((CURRENT_IO_READ - PREVIOUS_IO_READ))"
+IO_WRITE_DELTA="$((CURRENT_IO_WRITE - PREVIOUS_IO_WRITE))"
+SECTOR_READ_DELTA="$((CURRENT_SECTOR_READ - PREVIOUS_SECTOR_READ))"
+SECTOR_WRITE_DELTA="$((CURRENT_SECTOR_WRITE - PREVIOUS_SECTOR_WRITE))"
+if [ "$IO_READ_DELTA" -lt 0 ] || [ "$IO_WRITE_DELTA" -lt 0 ] || [ "$SECTOR_READ_DELTA" -lt 0 ] || [ "$SECTOR_WRITE_DELTA" -lt 0 ]; then
+  p_unknown "Invalid block stats delta"
+fi
+
+# Metrics
+IOPS="$(((IO_READ_DELTA + IO_WRITE_DELTA) / TIME_DELTA))"
+BW_READ="$(((SECTOR_READ_DELTA / SECTOR_PER_UNIT) / TIME_DELTA))"
+BW_WRITE="$(((SECTOR_WRITE_DELTA / SECTOR_PER_UNIT) / TIME_DELTA))"
+if [ "$IOPS" -lt 0 ] || [ "$BW_READ" -lt 0 ] || [ "$BW_WRITE" -lt 0 ]; then
+  p_unknown "Invalid IO/s or bandwidth stats"
+fi
+
+CRIT=0
+WARN=0
+
+# Compare IOPS against thresholds
+IOPS_TXT="$IOPS IO/s"
+if [ "$IOPS" -gt "$CRIT_IOPS" ]; then
+  CRIT="1"
+  IOPS_TXT="$IOPS_TXT (c=$CRIT_IOPS)"
+elif [ "$IOPS" -gt "$WARN_IOPS" ]; then
+  WARN="1"
+  IOPS_TXT="$IOPS_TXT (w=$WARN_IOPS)"
+fi
+
+# Compare read bw against thresholds
+READBW_TXT="read bw $BW_READ $UNIT_TXT"
+if [ "$BW_READ" -gt "$CRIT_READ" ]; then
+  CRIT="1"
+  READBW_TXT="$READBW_TXT (c=$CRIT_READ)"
+elif [ "$BW_READ" -gt "$WARN_READ" ]; then
+  WARN="1"
+  READBW_TXT="$READBW_TXT (w=$WARN_READ)"
+fi
+
+# Compare write bw against thresholds
+WRITEBW_TXT="write bw $BW_WRITE $UNIT_TXT"
+if [ "$BW_WRITE" -gt "$CRIT_WRITE" ]; then
+  CRIT="1"
+  WRITEBW_TXT="$WRITEBW_TXT (c=$CRIT_WRITE)"
+elif [ "$BW_WRITE" -gt "$WARN_WRITE" ]; then
+  WARN="1"
+  WRITEBW_TXT="$WRITEBW_TXT (w=$WARN_WRITE)"
+fi
+
+# Output metrics and perf data
+OUTPUT="$IOPS_TXT, $READBW_TXT, $WRITEBW_TXT|iops=$IOPS;$WARN_IOPS;$CRIT_IOPS;0 read=$BW_READ$UNIT_TXT;$WARN_READ;$CRIT_READ;0 write=$BW_WRITE$UNIT_TXT;$WARN_WRITE;$CRIT_WRITE;0"
+if [ "$CRIT" -eq 0 ] && [ "$WARN" -eq 0 ]; then
+  p_ok "$OUTPUT"
+elif [ "$CRIT" -eq 1 ]; then
+  p_critical "$OUTPUT"
+else
+  p_warning "$OUTPUT"
+fi

@@ -1,0 +1,178 @@
+#!/bin/sh
+
+# Nagios plugin to check for regular and security updates availability
+# Copyright (C) 2012-2017 Simon Deziel <simon@sdeziel.info>
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+# Explicitly set the PATH to that of ENV_SUPATH in /etc/login.defs and unset
+# various other variables. For details, see:
+# https://wiki.ubuntu.com/SecurityTeam/AppArmorPolicyReview#Execute_rules
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export ENV=
+export CDPATH=
+export LC_ALL="C"
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+MSG_OK="APT OK"
+MSG_WARNING="APT WARNING"
+MSG_CRITICAL="APT CRITICAL"
+MSG_UNKNOWN="APT UNKNOWN"
+SCRIPT_NAME="$(basename "$0")"
+BIN="/usr/lib/update-notifier/apt-check"
+GETOPT="/usr/bin/getopt"
+perf_data=""
+perf_data_enabled=1
+check_timeout=10
+verbosity="quiet"
+do_hwe_check="true"
+HWE_SUPPORT_STATUS_MSG=""
+PATH_TO_HWE_SUPPORT_STATUS="/usr/bin/hwe-support-status"
+TIMEOUT_BIN="$(/usr/bin/which timeout 2> /dev/null)"
+
+p_ok () {
+  printf "%s\n" "$MSG_OK: $1$perf_data"
+  exit "$STATE_OK"
+}
+p_warning () {
+  printf "%s\n" "$MSG_WARNING: $1$perf_data"
+  exit "$STATE_WARNING"
+}
+p_critical () {
+  printf "%s\n" "$MSG_CRITICAL: $1$perf_data"
+  exit "$STATE_CRITICAL"
+}
+p_unknown () {
+  printf "%s\n" "$MSG_UNKNOWN: $1$perf_data"
+  exit "$STATE_UNKNOWN"
+}
+
+usage () {
+  cat << EOF
+Usage:
+  $SCRIPT_NAME [-h] [-n] [-v] [-t timeout] [--skip-hwe-check]
+
+Options:
+ -h
+    Print help screen
+ -n
+    No performance data
+ -v
+    Verbose execution
+ -t
+    Seconds before execution times out (default: 10)
+ --skip-hwe-check
+    Skip HWE support status check
+EOF
+}
+
+long_usage () {
+  cat << EOF
+Copyright (c) 2012-2017 Simon Deziel
+
+This plugin checks for regular and security updates availability
+
+EOF
+  usage
+  exit 0
+}
+
+hwe_support_status () {
+  [ -e "$PATH_TO_HWE_SUPPORT_STATUS" ] || return
+
+  HWE_SUPPORT_STATUS_MSG="; $($PATH_TO_HWE_SUPPORT_STATUS --$verbosity 2>&1)"
+  if [ "$?" != 0 ]; then
+    security_updates="$((security_updates + 1))"
+  fi
+
+  # Throw out the HWE_SUPPORT_STATUS_MSG if in quiet mode or if mostly empty
+  if [ "$verbosity" = "quiet" ] || [ "$HWE_SUPPORT_STATUS_MSG" = "; " ]; then
+    HWE_SUPPORT_STATUS_MSG=""
+  fi
+}
+
+# Check if getopt is available
+if [ ! -x "$GETOPT" ]; then
+  p_unknown "$GETOPT is not available, hint install util-linux"
+fi
+
+# Note that we use `"$@"' to let each command-line parameter expand to a
+# separate word. The quotes around `$@' are essential!
+# We need TEMP as the `eval set --' would nuke the return value of getopt.
+TEMP=$($GETOPT -q -s sh -n "$SCRIPT_NAME" -o +hnvt: -l skip-hwe-check -- "$@")
+if [ $? != 0 ]; then
+  p_unknown "Unknown/invalid argument, see $SCRIPT_NAME -h for help"
+fi
+
+# Note the quotes around `$TEMP': they are essential!
+eval set -- "$TEMP"
+
+# Parse arguments
+while test "$1" != "--"; do case "$1" in
+      -h) long_usage; shift;;
+      -n) perf_data_enabled=0; shift;;
+      -v) verbosity="verbose"; shift;;
+      -t) echo "$2" | grep -qE '^[0-9]+(\.[0-9]+)?$' && check_timeout="$2"; shift 2;;
+      --skip-hwe-check) do_hwe_check="false"; shift;;
+      --) shift ; break;;
+      *)  p_unknown "Internal error";;
+   esac
+done
+
+# Check if the required binary is present
+if [ ! -x "$BIN" ]; then
+  p_unknown "$BIN is not available, hint install update-notifier-common"
+fi
+
+# Check if all worked
+[ -n "$TIMEOUT_BIN" ] || check_timeout=""
+updates="$($TIMEOUT_BIN $check_timeout $BIN 2>&1)"
+RC="$?"
+if [ "$RC" -eq 124 ]; then
+  p_critical "Plugin timed out after $check_timeout seconds"
+elif [ "$RC" -ne 0 ]; then
+  p_unknown "$BIN returned $RC"
+fi
+
+# Check if output is well-formed
+if ! echo "$updates" | grep -qE '^[0-9]+;[0-9]+$'; then
+  p_unknown "$BIN output not as expected: $updates"
+fi
+
+# All was fine so far so let's see how many updates are pending
+regular_updates="$(echo "$updates"|cut -d ';' -f1)"
+security_updates="$(echo "$updates"|cut -d ';' -f2)"
+
+# Check for HWE support status
+if [ "$do_hwe_check" = "true" ]; then
+  hwe_support_status
+fi
+
+if [ "$perf_data_enabled" -eq 1 ]; then
+  # Gather the perf data
+  perf_data="|regular=$regular_updates;;;0 security=$security_updates;;1;0"
+fi
+
+# Nothing pending?
+if [ "$security_updates" != 0 ]; then
+  p_critical "$regular_updates updates available ($security_updates critical)$HWE_SUPPORT_STATUS_MSG"
+elif [ "$regular_updates" != 0 ]; then
+  p_warning "$regular_updates updates available ($security_updates critical)$HWE_SUPPORT_STATUS_MSG"
+else
+  p_ok "All packages are up-to-date$HWE_SUPPORT_STATUS_MSG"
+fi
