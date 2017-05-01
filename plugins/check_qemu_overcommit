@@ -1,0 +1,177 @@
+#!/bin/sh
+
+# Nagios plugin to check if QEMU VMs use too much resources for what's available
+# Copyright (C) 2016-2017 Simon Deziel <simon@sdeziel.info>
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+# Explicitly set the PATH to that of ENV_SUPATH in /etc/login.defs and unset
+# various other variables. For details, see:
+# https://wiki.ubuntu.com/SecurityTeam/AppArmorPolicyReview#Execute_rules
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export ENV=
+export CDPATH=
+export LC_ALL="C"
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+MSG_OK="OK"
+MSG_WARNING="WARNING"
+MSG_CRITICAL="CRITICAL"
+MSG_UNKNOWN="UNKNOWN"
+SCRIPT_NAME="$(basename "$0")"
+GETOPT="/usr/bin/getopt"
+perf_data="|"
+
+p_ok () {
+  echo "$MSG_OK: $1$perf_data"
+  exit "$STATE_OK"
+}
+p_warning () {
+  echo "$MSG_WARNING: $1$perf_data"
+  exit "$STATE_WARNING"
+}
+p_critical () {
+  echo "$MSG_CRITICAL: $1$perf_data"
+  exit "$STATE_CRITICAL"
+}
+p_unknown () {
+  echo "$MSG_UNKNOWN: $1$perf_data"
+  exit "$STATE_UNKNOWN"
+}
+
+usage () {
+  cat << EOF
+Usage:
+  $SCRIPT_NAME [-h] -m <warning> -M <critical> -p <warning> -P <critical>
+
+Options:
+ -h
+    Print help screen
+ -m
+    Warning threshold for memory allocated to all QEMU guests.
+ -M
+    Critical threshold for memory allocated to all QEMU guests.
+ -p
+    Warning threshold for processors allocated to all QEMU guests.
+ -P
+    Critical threshold for processors allocated to all QEMU guests.
+EOF
+}
+
+long_usage () {
+  cat << EOF
+Copyright (C) 2016-2017 Simon Deziel
+
+This plugin check if the resources allocated to all QEMU guests are under a certain level.
+
+EOF
+  usage
+  exit 0
+}
+
+# Check if getopt is available
+if [ ! -x "$GETOPT" ]; then
+  p_unknown "$GETOPT is not available, hint install util-linux"
+fi
+
+# Note that we use `"$@"' to let each command-line parameter expand to a
+# separate word. The quotes around `$@' are essential!
+# We need TEMP as the `eval set --' would nuke the return value of getopt.
+TEMP=$($GETOPT -q -s sh -n "$SCRIPT_NAME" -o +hm:M:p:P: -- "$@")
+if [ $? != 0 ]; then
+  p_unknown "Unknown/invalid argument, see $SCRIPT_NAME -h for help"
+fi
+
+# Note the quotes around `$TEMP': they are essential!
+eval set -- "$TEMP"
+
+# Parse arguments
+while test "$1" != "--"; do case "$1" in
+      -h) long_usage; shift;;
+      -m) mem_warn="$(echo "$2"|awk '{printf "%.f\n", $1}')"; shift 2;;
+      -M) mem_crit="$(echo "$2"|awk '{printf "%.f\n", $1}')"; shift 2;;
+      -p) proc_warn="$(echo "$2"|awk '{printf "%.f\n", $1}')"; shift 2;;
+      -P) proc_crit="$(echo "$2"|awk '{printf "%.f\n", $1}')"; shift 2;;
+      --) shift ; break;;
+      *)  p_unknown "Internal error";;
+   esac
+done
+
+if [ -z "$mem_warn" ] || [ -z "$mem_crit" ] || [ -z "$proc_warn" ] || [ -z "$proc_crit" ]; then
+  p_unknown "Missing warning or critical threshold(s) for memory (-m/-M) or processor (-p/-P)."
+fi
+
+parse_qemu_cmdline() {
+  while [ "$#" -ge 1 ]; do
+    case $1 in
+      -m)   t_m=$((t_m+$2));shift 2;;
+      -smp) t_p=$((t_p+$2));shift 2;;
+      *)    shift;;
+    esac
+  done
+}
+
+t_m=0
+t_p=0
+
+# Parse each line one at the time and add up the memory and processors used
+OIFS="$IFS"
+IFS="
+"
+for qemu_args in $(pgrep -a ^qemu-system-.+); do
+  set -f
+  # split on spaces and "," to handle "-smp 1,sockets=1,cores=1,threads=1"
+  IFS=" ,"
+  # shellcheck disable=SC2086
+  parse_qemu_cmdline $qemu_args
+done
+IFS="$OIFS"
+
+MEM_UNIT="MB"
+perf_data="|mem=$t_m$MEM_UNIT;$mem_warn;$mem_crit;0;; proc=$t_p;$proc_warn;$proc_crit;0;;"
+
+state=$STATE_OK
+if [ "$t_p" -gt "$proc_crit" ]; then
+  proc_state="CRIT:$((t_p - proc_crit)) over"
+  state="$STATE_CRITICAL"
+elif [ "$t_p" -gt "$proc_warn" ]; then
+  proc_state="WARN:$((t_p - proc_warn)) over"
+  state="$STATE_WARNING"
+else
+  proc_state="OK:$((proc_warn - t_p)) available"
+fi
+
+if [ "$t_m" -gt "$mem_crit" ]; then
+  mem_state="CRIT:$((t_m - mem_crit)) $MEM_UNIT over"
+  state="$STATE_CRITICAL"
+elif [ "$t_m" -gt "$mem_warn" ]; then
+  mem_state="WARN:$((t_m - mem_warn)) $MEM_UNIT over"
+  [ "$state" != "$STATE_CRITICAL" ] && state="$STATE_WARNING"
+else
+  mem_state="OK:$((mem_warn - t_m)) $MEM_UNIT available"
+fi
+
+msg="memory ($mem_state) used=$t_m $MEM_UNIT warn=$mem_warn crit=$mem_crit, proc ($proc_state) used=$t_p warn=$proc_warn crit=$proc_crit"
+
+if [ "$state" = "$STATE_CRITICAL" ]; then
+  p_critical "$msg"
+elif [ "$state" = "$STATE_WARNING" ]; then
+  p_warning "$msg"
+else
+  p_ok "$msg"
+fi
