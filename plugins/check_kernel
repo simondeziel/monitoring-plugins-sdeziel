@@ -96,7 +96,7 @@ echo "$DESIRED_VER" | grep -q '^[0-9.~-]\+$' || p_unknown "Invalid desired kerne
 
 # Running
 [ -r "/proc/version_signature" ] || p_unknown "Unable to read /proc/version_signature"
-RUNNING_VER="$(sed 's/.*\s\(\S\+\)\s.*/\1/;s/[a-zA-Z-]*$//' /proc/version_signature)"
+RUNNING_VER="$(grep -m1 -o '\b[0-9.]\+-[0-9.]\+\b' /proc/version_signature)"
 [ -n "$RUNNING_VER" ] || p_unknown "Unable to get the version of the currently running kernel"
 
 # Check if behind
