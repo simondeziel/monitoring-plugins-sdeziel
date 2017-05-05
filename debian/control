@@ -1,0 +1,22 @@
+Source: monitoring-plugins-sdeziel
+Section: misc
+Priority: optional
+Maintainer: Simon Deziel <simon@sdeziel.info>
+Build-Depends: debhelper (>= 9)
+Standards-Version: 3.9.4
+Homepage: https://github.com/simondeziel/monitoring-plugins-sdeziel
+Vcs-Git: https://github.com/simondeziel/monitoring-plugins-sdeziel.git
+
+Package: monitoring-plugins-sdeziel
+Architecture: all
+Depends: perl,
+         ${misc:Depends}
+Description: Extra nagios plugins
+ This package provides a few extra nagios plugins
+ .
+  - check_apt_upgrade
+  - check_blkstat
+  - check_deleted_libs
+  - check_kernel
+  - check_livepatch
+  - check_qemu_overcommit
