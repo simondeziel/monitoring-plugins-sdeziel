@@ -9,8 +9,7 @@ Vcs-Git: https://github.com/simondeziel/monitoring-plugins-sdeziel.git
 
 Package: monitoring-plugins-sdeziel
 Architecture: all
-Depends: perl,
-         ${misc:Depends}
+Depends: ${misc:Depends}
 Description: Extra nagios plugins
  This package provides a few extra nagios plugins
  .
