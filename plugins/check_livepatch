@@ -25,10 +25,12 @@ export ENV=
 export CDPATH=
 export LC_ALL="C"
 
-LIVEPATCH="$(which canonical-livepatch 2> /dev/null)"
-[ -x "$LIVEPATCH" ] || { echo "LIVEPATCH UNKNOWN: No canonical-livepatch binary"; exit 3; }
+if ! which canonical-livepatch 2> /dev/null; then
+  echo "LIVEPATCH UNKNOWN: No canonical-livepatch binary"
+  exit 3
+fi
 
-OUTPUT="$($LIVEPATCH status --verbose)"
+OUTPUT="$(canonical-livepatch status --verbose)"
 cve_count="$(echo "$OUTPUT" | grep -cF "CVE-")"
 
 if echo "$OUTPUT" | grep -q "patchState: nothing-to-apply$"; then
