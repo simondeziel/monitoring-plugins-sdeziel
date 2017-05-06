@@ -20,7 +20,7 @@
 # Explicitly set the PATH to that of ENV_SUPATH in /etc/login.defs and unset
 # various other variables. For details, see:
 # https://wiki.ubuntu.com/SecurityTeam/AppArmorPolicyReview#Execute_rules
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
 export ENV=
 export CDPATH=
 export LC_ALL="C"
