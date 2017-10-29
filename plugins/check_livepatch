@@ -25,7 +25,7 @@ export ENV=
 export CDPATH=
 export LC_ALL="C"
 
-if ! which canonical-livepatch 2> /dev/null; then
+if ! which canonical-livepatch > /dev/null 2>&1; then
   echo "LIVEPATCH UNKNOWN: No canonical-livepatch binary"
   exit 3
 fi
