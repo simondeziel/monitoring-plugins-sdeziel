@@ -1,0 +1,111 @@
+#!/bin/sh
+
+# Report the frontends, backends and servers down in HAProxy
+# Copyright (C) 2017-2019 Simon Deziel <simon@sdeziel.info>
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+# Explicitly set the PATH to that of ENV_SUPATH in /etc/login.defs and unset
+# various other variables. For details, see:
+# https://wiki.ubuntu.com/SecurityTeam/AppArmorPolicyReview#Execute_rules
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export ENV=
+export CDPATH=
+export LC_ALL="C"
+
+SOCKET_PATH="/run/haproxy/admin.sock"
+if ! [ -S "$SOCKET_PATH" ]; then
+  echo "HAPROXY UNKNOWN: missing HAProxy stat socket ($SOCKET_PATH)"
+  exit 3
+fi
+if ! [ -w "$SOCKET_PATH" ]; then
+  echo "HAPROXY UNKNOWN: HAProxy stat socket ($SOCKET_PATH) not writeable"
+  exit 3
+fi
+
+if ! which nc > /dev/null 2>&1 || ! nc -h 2>&1 | grep -q ^OpenBSD; then
+  echo "HAPROXY UNKNOWN: please install netcat-openbsd"
+  exit 3
+fi
+
+FRONTEND_CNT=0
+FRONTEND_DOWN_CNT=0
+FRONTEND_DOWN_NAME=""
+BACKEND_CNT=0
+BACKEND_DOWN_CNT=0
+BACKEND_DOWN_NAME=""
+SERVER_CNT=0
+SERVER_DOWN_CNT=0
+SERVER_DOWN_NAME=""
+
+# lines with 'no check' are for servers that do not have any health check enabled
+for line in $(echo 'show stat' | nc -U "$SOCKET_PATH" | cut -d, -f 1,2,18 | sed '/^#/d; /^$/d; /no check$/d'); do
+  pxname="$(echo "$line" | cut -d, -f1)"
+  svname="$(echo "$line" | cut -d, -f2)"
+  status="$(echo "$line" | cut -d, -f3)"
+  case "$svname" in
+    "FRONTEND")
+      FRONTEND_CNT="$((FRONTEND_CNT+1))"; \
+      if [ "$status" != "OPEN" ]; then \
+        FRONTEND_DOWN_CNT="$((FRONTEND_DOWN_CNT+1))"; \
+        FRONTEND_DOWN_NAME="$FRONTEND_DOWN_NAME $pxname"; \
+      fi;;
+    "BACKEND")
+      BACKEND_CNT="$((BACKEND_CNT+1))"; \
+      if [ "$status" != "UP" ]; then \
+        BACKEND_DOWN_CNT="$((BACKEND_DOWN_CNT+1))"; \
+        BACKEND_DOWN_NAME="$BACKEND_DOWN_NAME $pxname"; \
+      fi \
+      ;;
+    *)
+      SERVER_CNT="$((SERVER_CNT+1))"; \
+      if [ "$status" != "UP" ]; then \
+        SERVER_DOWN_CNT="$((SERVER_DOWN_CNT+1))"; \
+        SERVER_DOWN_NAME="$SERVER_DOWN_NAME $svname"; \
+      fi \
+      ;;
+  esac
+done
+
+# pretty print string lists
+SERVER_DOWN_NAME="$(echo "$SERVER_DOWN_NAME" | sed 's/^ //; s/ $//')"
+FRONTEND_DOWN_NAME="$(echo "$FRONTEND_DOWN_NAME" | sed 's/^ //; s/ $//')"
+BACKEND_DOWN_NAME="$(echo "$BACKEND_DOWN_NAME" | sed 's/^ //; s/ $//')"
+
+STATUS="OK"
+RC=0
+MSG=""
+if [ "$SERVER_DOWN_CNT" != 0 ]; then
+  MSG="$MSG$SERVER_DOWN_CNT out of $SERVER_CNT servers down ($SERVER_DOWN_NAME) "
+  STATUS="WARN"
+  RC=1
+fi
+if [ "$FRONTEND_DOWN_CNT" != 0 ]; then
+  MSG="$MSG$FRONTEND_DOWN_CNT out of $FRONTEND_CNT frontends down ($FRONTEND_DOWN_NAME) "
+  STATUS="CRIT"
+  RC=2
+fi
+if [ "$BACKEND_DOWN_CNT" != 0 ]; then
+  MSG="$MSG$BACKEND_DOWN_CNT out of $BACKEND_CNT backends down: ($BACKEND_DOWN_NAME) "
+  STATUS="CRIT"
+  RC=2
+fi
+
+if [ "$RC" = 0 ]; then
+  MSG="$FRONTEND_CNT frontends and $BACKEND_CNT backends up"
+fi
+
+echo "HAPROXY $STATUS: $MSG"
+exit "$RC"
