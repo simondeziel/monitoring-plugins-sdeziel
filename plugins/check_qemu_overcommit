@@ -34,7 +34,6 @@ MSG_WARNING="WARNING"
 MSG_CRITICAL="CRITICAL"
 MSG_UNKNOWN="UNKNOWN"
 SCRIPT_NAME="$(basename "$0")"
-GETOPT="/usr/bin/getopt"
 perf_data="|"
 
 p_ok () {
@@ -84,31 +83,17 @@ EOF
   exit 0
 }
 
-# Check if getopt is available
-if [ ! -x "$GETOPT" ]; then
-  p_unknown "$GETOPT is not available, hint install util-linux"
-fi
-
-# Note that we use `"$@"' to let each command-line parameter expand to a
-# separate word. The quotes around `$@' are essential!
-# We need TEMP as the `eval set --' would nuke the return value of getopt.
-TEMP=$($GETOPT -q -s sh -n "$SCRIPT_NAME" -o +hm:M:p:P: -- "$@")
-if [ $? != 0 ]; then
-  p_unknown "Unknown/invalid argument, see $SCRIPT_NAME -h for help"
-fi
-
-# Note the quotes around `$TEMP': they are essential!
-eval set -- "$TEMP"
-
 # Parse arguments
-while test "$1" != "--"; do case "$1" in
+while true; do
+  case "$1" in
       -h) long_usage; shift;;
       -m) mem_warn="$(echo "$2"|awk '{printf "%.f\n", $1}')"; shift 2;;
       -M) mem_crit="$(echo "$2"|awk '{printf "%.f\n", $1}')"; shift 2;;
       -p) proc_warn="$(echo "$2"|awk '{printf "%.f\n", $1}')"; shift 2;;
       -P) proc_crit="$(echo "$2"|awk '{printf "%.f\n", $1}')"; shift 2;;
       --) shift ; break;;
-      *)  p_unknown "Internal error";;
+      -* | --* ) p_unknown "Unknown argument: $1";;
+      *)  break;;
    esac
 done
 
