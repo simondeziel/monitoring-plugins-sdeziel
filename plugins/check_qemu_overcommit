@@ -101,34 +101,30 @@ if [ -z "$mem_warn" ] || [ -z "$mem_crit" ] || [ -z "$proc_warn" ] || [ -z "$pro
   p_unknown "Missing warning or critical threshold(s) for memory (-m/-M) or processor (-p/-P)."
 fi
 
-parse_qemu_cmdline() {
-  while [ "$#" -ge 1 ]; do
-    case $1 in
-      -m)   t_m=$((t_m+$2));shift 2;;
-      -smp) t_p=$((t_p+$2));shift 2;;
-      *)    shift;;
-    esac
-  done
+# silence shellcheck not noticing those
+# variables are set in the eval below
+#t_m=0
+#t_p=0
+
+eval "$(pgrep -a ^qemu-system-.+ | awk '
+{
+  for (i=3; i <= NF; i++) {
+    if ($i == "-smp") {
+      vcpus+=$(i+1)
+    } else if ($i == "-m") {
+      mem+=$(i+1)
+    }
+  }
 }
+END { print "t_p=" vcpus "\n" "t_m=" mem }
+')"
 
-t_m=0
-t_p=0
-
-# Parse each line one at the time and add up the memory and processors used
-OIFS="$IFS"
-IFS="
-"
-for qemu_args in $(pgrep -a ^qemu-system-.+); do
-  set -f
-  # split on spaces and "," to handle "-smp 1,sockets=1,cores=1,threads=1"
-  IFS=" ,"
-  # shellcheck disable=SC2086
-  parse_qemu_cmdline $qemu_args
-done
-IFS="$OIFS"
+# if there are no QEMU
+[ -z "$t_p" ] && t_p=0
+[ -z "$t_m" ] && t_m=0
 
 MEM_UNIT="MB"
-perf_data="|mem=$t_m$MEM_UNIT;$mem_warn;$mem_crit;0;; proc=$t_p;$proc_warn;$proc_crit;0;;"
+perf_data="|mem=${t_m}${MEM_UNIT};$mem_warn;$mem_crit;0;; proc=${t_p};$proc_warn;$proc_crit;0;;"
 
 state=$STATE_OK
 if [ "$t_p" -gt "$proc_crit" ]; then
