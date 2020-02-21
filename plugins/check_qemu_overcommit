@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Nagios plugin to check if QEMU VMs use too much resources for what's available
-# Copyright (C) 2016-2017 Simon Deziel <simon@sdeziel.info>
+# Copyright (C) 2016-2020 Simon Deziel <simon@sdeziel.info>
 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
